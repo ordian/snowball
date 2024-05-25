@@ -2,6 +2,8 @@ mod affine_gen;
 mod apk_circuits;
 mod sum_acc;
 
+pub use apk_circuits::{keys_to_limbs, ApkCircuit};
+
 #[cfg(test)]
 mod tests {
     use ark_ff::Field;

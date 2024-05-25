@@ -18,6 +18,10 @@ derivative = { version = "2", features = ["use_core"] }
 rand = { version = "0.8.4", features = ["getrandom"] }
 
 [dev-dependencies]
-ark-bls12-381 = { version = "0.4.0", features = ["curve"], default-features = false }
-ark-bls12-377 = { version = "0.4.0", features = ["curve"], default-features = false }
+ark-bls12-381 = { version = "0.4.0", features = [
+    "curve",
+], default-features = false }
+ark-bls12-377 = { version = "0.4.0", features = [
+    "curve",
+], default-features = false }
 ark-bw6-761 = { version = "0.4.0", default-features = false }
