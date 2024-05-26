@@ -3,6 +3,7 @@ use std::marker::PhantomData;
 use ark_ec::short_weierstrass::{Affine, SWCurveConfig};
 use ark_ff::{Field, PrimeField};
 use ark_r1cs_std::alloc::AllocVar;
+use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::fields::nonnative::params::OptimizationType;
 use ark_r1cs_std::fields::nonnative::AllocatedNonNativeFieldVar;
@@ -20,16 +21,18 @@ pub struct ApkCircuit<P: SWCurveConfig, CF: Field, F: FieldVar<P::BaseField, CF>
     keys: Vec<Affine<P>>,
     seed: Affine<P>,
     packed_bits: CF,
+    apk: Affine<P>,
     #[derivative(Debug = "ignore")]
     _f: PhantomData<F>,
 }
 
 impl<P: SWCurveConfig, CF: Field, F: FieldVar<P::BaseField, CF>> ApkCircuit<P, CF, F> {
-    pub fn new(keys: Vec<Affine<P>>, seed: Affine<P>, packed_bits: CF) -> Self {
+    pub fn new(keys: Vec<Affine<P>>, seed: Affine<P>, packed_bits: CF, apk: Affine<P>) -> Self {
         Self {
             keys,
             seed,
             packed_bits,
+            apk,
             _f: PhantomData,
         }
     }
@@ -45,7 +48,7 @@ where
     fn generate_constraints(self, cs: ConstraintSystemRef<CF>) -> ark_relations::r1cs::Result<()> {
         let seed_const = NonZeroAffineVarGeneric::<P, F, CF>::new_constant(
             ark_relations::ns!(cs, "seed"),
-            &self.seed,
+            self.seed,
         )?;
         let key_vars = Vec::<NonZeroAffineVarGeneric<P, F, CF>>::new_input(
             ark_relations::ns!(cs, "keys"),
@@ -54,6 +57,10 @@ where
         let packed_bits_var = FpVar::new_input(ark_relations::ns!(cs, "bitmask_packed"), || {
             Ok(&self.packed_bits)
         })?;
+        let apk =
+            NonZeroAffineVarGeneric::<P, F, CF>::new_input(ark_relations::ns!(cs, "apk"), || {
+                Ok(&self.apk)
+            })?;
         let bit_vars = packed_bits_var.to_bits_le()?;
 
         let mut curr_sum = seed_const;
@@ -62,6 +69,7 @@ where
             curr_sum =
                 NonZeroAffineVarGeneric::<P, F, CF>::conditionally_select(b, &next_sum, &curr_sum)?;
         }
+        apk.enforce_equal(&curr_sum)?;
         Ok(())
     }
 }
@@ -85,6 +93,7 @@ pub fn keys_to_limbs<F: PrimeField, CF: PrimeField, P: SWCurveConfig<BaseField =
 mod tests {
     use ark_bls12_381::Bls12_381;
     use ark_bw6_761::BW6_761;
+    use ark_ec::{AffineRepr, CurveGroup};
     use ark_groth16::{Groth16, PreparedVerifyingKey};
     use ark_r1cs_std::boolean::Boolean;
     use ark_r1cs_std::fields::nonnative::NonNativeFieldVar;
@@ -113,20 +122,41 @@ mod tests {
             .value()
             .unwrap();
 
-        let circuit = ApkCircuit {
-            keys: keys.clone(),
-            seed,
-            packed_bits,
-            _f: PhantomData::<NonNativeFieldVar<ark_bls12_381::Fq, ark_bls12_381::Fr>>,
-        };
+        let apk = keys
+            .iter()
+            .zip(bits.iter())
+            .fold(
+                seed.into_group(),
+                |acc, (key, bit)| {
+                    if *bit {
+                        acc + key
+                    } else {
+                        acc
+                    }
+                },
+            );
+
+        let apk = apk.into_affine();
+        let circuit =
+            ApkCircuit::<_, _, NonNativeFieldVar<ark_bls12_381::Fq, ark_bls12_381::Fr>>::new(
+                keys.clone(),
+                seed,
+                packed_bits,
+                apk,
+            );
 
         //TODO: circuit can be empty
         let (pk, vk) = Groth16::<Bls12_381>::circuit_specific_setup(circuit.clone(), rng).unwrap();
         let proof = Groth16::<Bls12_381>::prove(&pk, circuit.clone(), rng).unwrap();
 
         let pvk: PreparedVerifyingKey<Bls12_381> = vk.into();
+
         let mut pi = keys_to_limbs(&keys);
         pi.push(packed_bits);
+        let apk_bits: Vec<ark_ff::Fp<ark_ff::MontBackend<ark_bls12_381::FrConfig, 4>, 4>> =
+            keys_to_limbs(&[apk]);
+        pi.extend(apk_bits);
+
         let pi = Groth16::<Bls12_381>::prepare_inputs(&pvk, &pi).unwrap();
         assert!(
             Groth16::<Bls12_381>::verify_proof_with_prepared_inputs(&pvk, &proof, &pi).unwrap()
@@ -149,20 +179,35 @@ mod tests {
             .value()
             .unwrap();
 
-        let circuit = ApkCircuit {
-            keys: keys.clone(),
-            seed,
-            packed_bits,
-            _f: PhantomData::<FpVar<ark_bw6_761::Fr>>,
-        };
+        let apk = keys
+            .iter()
+            .zip(bits.iter())
+            .fold(
+                seed.into_group(),
+                |acc, (key, bit)| {
+                    if *bit {
+                        acc + key
+                    } else {
+                        acc
+                    }
+                },
+            );
+
+        let apk = apk.into_affine();
+        let circuit =
+            ApkCircuit::<_, _, FpVar<ark_bw6_761::Fr>>::new(keys.clone(), seed, packed_bits, apk);
 
         //TODO: circuit can be empty
         let (pk, vk) = Groth16::<BW6_761>::circuit_specific_setup(circuit.clone(), rng).unwrap();
         let proof = Groth16::<BW6_761>::prove(&pk, circuit.clone(), rng).unwrap();
 
         let pvk: PreparedVerifyingKey<BW6_761> = vk.into();
+
         let mut pi: Vec<ark_bw6_761::Fr> = keys.iter().flat_map(|p| vec![p.x, p.y]).collect();
         pi.push(packed_bits);
+        pi.push(apk.x);
+        pi.push(apk.y);
+
         let pi = Groth16::<BW6_761>::prepare_inputs(&pvk, &pi).unwrap();
         assert!(Groth16::<BW6_761>::verify_proof_with_prepared_inputs(&pvk, &proof, &pi).unwrap());
     }
